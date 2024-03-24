@@ -1,0 +1,215 @@
+---
+title: "Merge Data Code"
+author: "Stephen Min"
+date: "2024-03-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r demand data}
+library(dplyr)
+library(tidyr)
+library(readr)
+
+s_data <- read_csv("simulated_data/midterm_simulated_market_data_s.csv")
+x_data <- read_csv("simulated_data/midterm_simulated_market_data_x.csv")
+
+# Mapping for firm IDs
+firm_ids <- c("MD" = 1, "TH" = 2, "SB" = 3)
+
+# Convert the shares data to long format and assign firm IDs
+s_data_long <- s_data %>%
+  pivot_longer(cols = -marketid, names_to = "firm", values_to = "share") %>%
+  mutate(firm = firm_ids[firm])
+
+# Transform x_data and extract price and caffeine_score while eliminating the prefix
+x_data_long <- x_data %>%
+  pivot_longer(cols = matches("^(price|caffeine_score)_"), 
+               names_to = c(".value", "firm"), 
+               names_pattern = "^(.+)_(.+)$") %>%
+  mutate(firm = firm_ids[firm])
+
+# Merge the transformed data based on marketid and firm
+final_data <- s_data_long %>%
+  left_join(x_data_long, by = c("marketid", "firm"))
+
+# Add const column
+final_data$const <- 1
+
+# Add id column
+final_data <- final_data %>%
+  mutate(id = firm_ids[firm])
+  
+write_csv(final_data, "simulated_data/merged_midterm_data.csv")
+```
+
+```{r supply data}
+library(dplyr)
+library(tidyr)
+library(readr)
+
+w_data <- read_csv("simulated_data/midterm_simulated_market_data_w.csv")
+x_data <- read_csv("simulated_data/midterm_simulated_market_data_x.csv")
+s_data <- read_csv("simulated_data/midterm_simulated_market_data_s.csv")
+
+# Mapping for firm IDs
+firm_ids <- c("MD" = 1, "TH" = 2, "SB" = 3)
+
+# Transform w_data and extract caffeine_score while eliminating the prefix
+w_data_long <- w_data %>%
+  pivot_longer(cols = matches("^(caffeine_score)_"), 
+               names_to = c(".value", "firm"), 
+               names_pattern = "^(.+)_(.+)$") %>%
+  mutate(firm = firm_ids[firm])
+  
+## Extract price and shares from other files
+# Most of this is from the demand section, it's just reused here since I wanted
+# each code snippet to run independently.
+s_data_long <- s_data %>%
+  pivot_longer(cols = -marketid, names_to = "firm", values_to = "share") %>%
+  mutate(firm = firm_ids[firm])
+
+x_data_long <- x_data %>%
+  pivot_longer(cols = matches("^(price|caffeine_score)_"), 
+               names_to = c(".value", "firm"), 
+               names_pattern = "^(.+)_(.+)$") %>%
+  mutate(firm = firm_ids[firm])
+
+final_data <- s_data_long %>%
+  left_join(x_data_long, by = c("marketid", "firm"))
+
+w_data_long <- w_data_long %>%
+  left_join(final_data %>% select(marketid, firm, price, share), by = c('marketid', 'firm'))
+
+write_csv(w_data_long, "simulated_data/merged_w_data.csv")
+```
+
+```{r demand instruments}
+iv <- read_csv("simulated_data/midterm_simulated_market_data_zd.csv")
+
+# Pivot the data into long format based on company
+long_iv <- iv %>%
+  pivot_longer(
+    cols = -marketid, 
+    names_to = c(".value", "company"),  
+    names_pattern = "^(zd[1-7])_(MD|TH|SB)$"  
+  )
+
+write_csv(long_iv, "simulated_data/iv_demand.csv")
+```
+
+```{r supply instruments}
+iv <- read_csv("simulated_data/midterm_simulated_market_data_zs.csv")
+
+# Pivot the data into long format based on company
+long_iv <- iv %>%
+  pivot_longer(
+    cols = -marketid, 
+    names_to = c(".value", "company"),  
+    names_pattern = "^(zs[1-7])_(MD|TH|SB)$"  
+  )
+
+write_csv(long_iv, "simulated_data/iv_supply.csv")
+```
+
+```{r draws}
+library(MASS)
+
+# Parameters
+num_markets = 200
+num_individuals = 500
+num_variables = 2
+set.seed(98426)
+
+# Mean vector and covariance matrix for the multivariate normal distribution
+mean_vector = rep(0, num_variables)
+cov_matrix = diag(num_variables)  # Identity matrix for simplicity
+
+# Generate the random draws for all individuals in all markets
+# Each row represents a draw for an individual in a market
+random_draws = mvrnorm(n = num_markets * num_individuals, mu = mean_vector, Sigma = cov_matrix)
+
+# Convert the matrix to a data frame
+draws_df = data.frame(random_draws)
+
+# Save the draws to a CSV file
+output_filename = sprintf("simulated_data/%ddraws.csv", num_individuals)
+write.table(draws_df, output_filename, sep=",", row.names = FALSE, col.names = FALSE)
+```
+
+```{r merger min caffeine}
+library(dplyr)
+library(tidyr)
+library(readr)
+
+w_data <- read_csv("simulated_data/midterm_simulated_market_data_w.csv")
+
+# Pivot to long format and create a unique identifier
+w_data_long <- w_data %>%
+  pivot_longer(cols = starts_with("caffeine_score"), 
+               names_to = c(".value", "product"), 
+               names_pattern = "^(.+)_(.+)$") %>%
+  mutate(product_id = row_number())  # Unique identifier for each product
+
+# Map MD and TH to the same firm ID but keep their products distinct
+firm_ids <- c("MD" = 1, "TH" = 1, "SB" = 2)
+w_data_long <- w_data_long %>%
+  mutate(firm = firm_ids[product])
+
+# For MD and TH, calculate the minimum caffeine score and then merge this information back
+min_caffeine_scores <- w_data_long %>%
+  filter(firm == 1) %>%
+  group_by(marketid) %>%
+  summarise(min_caffeine_score = min(caffeine_score, na.rm = TRUE), .groups = 'drop')
+
+# Join the minimum caffeine score with the original data and adjust for MD and TH
+final_data <- w_data_long %>%
+  left_join(min_caffeine_scores, by = "marketid") %>%
+  mutate(caffeine_score = if_else(firm == 1 & !is.na(min_caffeine_score), min_caffeine_score, caffeine_score))
+
+# Removing unneeded columns
+final_data <- final_data %>%
+  dplyr::select(-product, -min_caffeine_score)
+
+write_csv(final_data, "simulated_data/merger_w_data.csv")
+```
+
+```{r average caffeine merger}
+library(dplyr)
+library(tidyr)
+library(readr)
+
+w_data <- read_csv("simulated_data/midterm_simulated_market_data_w.csv")
+
+# Pivot to long format and create a unique identifier
+w_data_long <- w_data %>%
+  pivot_longer(cols = starts_with("caffeine_score"), 
+               names_to = c(".value", "product"), 
+               names_pattern = "^(.+)_(.+)$") %>%
+  mutate(product_id = row_number())  # Unique identifier for each product
+
+# Map MD and TH to the same firm ID but keep their products distinct
+firm_ids <- c("MD" = 1, "TH" = 1, "SB" = 2)
+w_data_long <- w_data_long %>%
+  mutate(firm = firm_ids[product])
+
+# For MD and TH, calculate the minimum caffeine score and then merge this information back
+avg_caffeine_scores <- w_data_long %>%
+  filter(firm == 1) %>%
+  group_by(marketid) %>%
+  summarise(avg_caffeine_score = mean(caffeine_score, na.rm = TRUE), .groups = 'drop')
+
+# Join the minimum caffeine score with the original data and adjust for MD and TH
+final_data <- w_data_long %>%
+  left_join(avg_caffeine_scores, by = "marketid") %>%
+  mutate(caffeine_score = if_else(firm == 1 & !is.na(avg_caffeine_score), avg_caffeine_score, caffeine_score))
+
+# Removing unneeded columns
+final_data <- final_data %>%
+  dplyr::select(-product, -avg_caffeine_score)
+
+write_csv(final_data, "simulated_data/merger_w_data2.csv")
+```
